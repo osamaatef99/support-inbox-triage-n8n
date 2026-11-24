@@ -1,0 +1,269 @@
+{
+  "name": "AI Support Inbox Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": true,
+        "filters": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "q": "-from:me"
+        },
+        "options": {}
+      },
+      "id": "96625b78-455c-595e-8310-1bcf84f5714f",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        200
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "SET ME: Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const m = $json;\nconst from = m.From || m.from?.text || '';\nconst subject = m.Subject || m.subject || '(no subject)';\nconst body = (m.snippet || m.text || '').toString().slice(0, 3000);\nreturn [{ json: { message_id: m.id || '', thread_id: m.threadId || '', from, subject, body, received_at: new Date().toISOString() } }];"
+      },
+      "id": "df516f73-5e40-531d-8b6e-674e9e4f42fb",
+      "name": "Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({model:'openai/gpt-oss-20b',temperature:0.2,response_format:{type:'json_object'},messages:[{role:'system',content:\"You triage customer support emails for a small business. Return ONLY JSON with keys: category (one of billing, bug, sales, general), urgency (low, medium, high), summary (max 20 words), reply (a polite, short draft reply in the sender's language that does not promise refunds, prices or dates). If unsure, say a team member will follow up.\"},{role:'user',content:'From: '+$json.from+'\\nSubject: '+$json.subject+'\\n\\n'+$json.body}]}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "61c1489e-54c7-5922-a6d4-6176c0103118",
+      "name": "Groq: Triage + Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "groqApi": {
+          "id": "",
+          "name": "SET ME: Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.choices?.[0]?.message?.content ?? '';\nconst src = $('Normalize Email').item.json;\nlet out;\ntry { out = JSON.parse(raw); } catch (e) { out = null; }\nconst cats = ['billing','bug','sales','general'];\nconst urg = ['low','medium','high'];\nif (!out || !out.reply) {\n  return [{ json: { ...src, category: 'general', urgency: 'medium', summary: 'AI output unreadable, review manually', reply: '', ai_ok: false } }];\n}\nreturn [{ json: { ...src, category: cats.includes(out.category) ? out.category : 'general', urgency: urg.includes(out.urgency) ? out.urgency : 'medium', summary: String(out.summary || '').slice(0, 200), reply: String(out.reply), ai_ok: true } }];"
+      },
+      "id": "a1db486c-906c-58c5-bb50-08aef74e4498",
+      "name": "Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "operation": "create",
+        "subject": "={{ 'Re: ' + $json.subject }}",
+        "message": "={{ $json.reply }}",
+        "options": {
+          "threadId": "={{ $json.thread_id }}"
+        }
+      },
+      "id": "3a526a78-ead1-5fff-b2c7-a56974b11d43",
+      "name": "Gmail: Save Reply Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        960,
+        120
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "SET ME: Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.received_at }}",
+            "from": "={{ $json.from }}",
+            "subject": "={{ $json.subject }}",
+            "category": "={{ $json.category }}",
+            "urgency": "={{ $json.urgency }}",
+            "summary": "={{ $json.summary }}",
+            "ai_ok": "={{ $json.ai_ok }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        }
+      },
+      "id": "6bf857cf-4e7f-58ae-a9ef-d72135f51b2b",
+      "name": "Sheets: Log Ticket",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "SET ME: Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## 1. Capture\nGmail Trigger polls the inbox. Normalize Email keeps only what the AI needs.",
+        "width": 480,
+        "height": 120,
+        "color": 4
+      },
+      "id": "fb29796f-2033-53bb-9d30-b8707e5d3c3c",
+      "name": "Note: 1. Capture",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Triage\nGroq classifies and drafts. Parse AI Result falls back safely if the model returns bad JSON.",
+        "width": 480,
+        "height": 120,
+        "color": 5
+      },
+      "id": "2909ce97-83e5-5e0a-aa22-0f19d7f786c2",
+      "name": "Note: 2. Triage",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Human in the loop\nReply is saved as a DRAFT. Nothing is sent automatically. Ticket logged in Sheets.",
+        "width": 400,
+        "height": 120,
+        "color": 6
+      },
+      "id": "c6ed1f35-f623-563b-8144-3b4164afee75",
+      "name": "Note: 3. Human in the loop",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        960,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Email": {
+      "main": [
+        [
+          {
+            "node": "Groq: Triage + Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq: Triage + Draft": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Result": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Save Reply Draft",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sheets: Log Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
